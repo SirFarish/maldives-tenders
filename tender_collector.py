@@ -59,13 +59,17 @@ TYPE_EN = {
     "masakkaiy": "Works / Project",
     "gannan-beynunvaa": "Goods Wanted",
     "kuyyah-dhinun": "For Lease",
+    "kuyyah-hifun": "Wanted to Rent",
     "neelan": "Auction",
     "vazeefaa": "Job Vacancy",
+    "thamreenu": "Training",
+    "mubaaraaiy": "Competition",
     "aanmu-mauloomaathu": "General Info",
     "dhennevun": "Notice",
 }
 # Types that represent an actual tender / procurement opportunity.
-TENDER_TYPES = {"beelan", "masakkaiy", "gannan-beynunvaa", "kuyyah-dhinun", "neelan"}
+TENDER_TYPES = {"beelan", "masakkaiy", "gannan-beynunvaa",
+                "kuyyah-dhinun", "kuyyah-hifun", "neelan"}
 
 
 def parse_dhivehi_date(text):
