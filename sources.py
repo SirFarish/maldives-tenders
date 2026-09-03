@@ -272,9 +272,59 @@ def collect_stelco(target_dates):
 
 
 # ---------------------------------------------------------------------------
+# Source: MWSC (mwsc.com.mv/tenders)
+# MWSC lists only *currently open* tenders (no publish date — just a
+# registration deadline and a bid-submission date), so this adapter ignores the
+# date window and returns every open tender, using the bid date as the deadline.
+# ---------------------------------------------------------------------------
+MWSC_BASE = "https://www.mwsc.com.mv/tenders"
+
+
+def collect_mwsc(target_dates):
+    today = dt.date.today()
+    soup = _get(MWSC_BASE)
+    table = soup.find("table")
+    if not table:
+        return []
+    out = []
+    for tr in table.find_all("tr")[1:]:
+        tds = tr.find_all("td")
+        if len(tds) < 3:
+            continue
+        title = _clean(tds[0].get_text(" ", strip=True))
+        if not title:
+            continue
+        bid_raw = tds[2].get_text(" ", strip=True).split("|")[0]
+        deadline = parse_english_date(bid_raw)
+        if deadline and deadline < today:
+            continue  # already closed
+        doc = None
+        for td in tds:
+            a = td.find("a")
+            if a and a.get("href"):
+                doc = a["href"]
+                break
+        out.append({
+            "source": "MWSC",
+            "id": f"mwsc:{title[:60]}",
+            "title": title,
+            "org": "MWSC",
+            "type_slug": "beelan",
+            "type_en": "Bid / Tender",
+            "is_tender": True,
+            "published": None,           # site gives no publish date
+            "deadline": deadline,
+            "url": doc or MWSC_BASE,
+            "ref": extract_ref(title),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Registry — add new adapters here as they are built
 # ---------------------------------------------------------------------------
 SOURCES = {
     "Gazette": collect_gazette,
     "STELCO": collect_stelco,
+    "MWSC": collect_mwsc,
 }

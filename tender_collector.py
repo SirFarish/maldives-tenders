@@ -208,6 +208,7 @@ def build_html(rows, target_dates, generated_at, errors):
   .pill.t {{ background:#eaf3ee; color:#0b3d2e; font-weight:600; }}
   .srcpill {{ border-radius:6px; padding:2px 8px; font-size:12px; font-weight:600; background:#e7edf5; color:#274b74; white-space:nowrap; }}
   .srcpill.s-stelco {{ background:#fdf0e4; color:#a05a1a; }}
+  .srcpill.s-mwsc {{ background:#e4f3f6; color:#12707f; }}
   .src-extra {{ display:inline-block; margin-left:4px; font-size:11px; color:#8a5a1a; text-decoration:none; }}
   .badge {{ font-size:11px; padding:1px 7px; border-radius:10px; margin-left:4px; }}
   .badge.ok {{ background:#e8f0fe; color:#1a56b0; }}
@@ -229,6 +230,7 @@ def build_html(rows, target_dates, generated_at, errors):
     .pill.t {{ background:#173a2c; color:#8fe3bd; }}
     .srcpill {{ background:#1c2c40; color:#9dc0ee; }}
     .srcpill.s-stelco {{ background:#3a2a17; color:#e3b98f; }}
+    .srcpill.s-mwsc {{ background:#153338; color:#8fd6e0; }}
     .errs {{ background:#2c2410; color:#e3c583; border-color:#5a4a1a; }}
   }}
 </style></head><body>
