@@ -26,6 +26,7 @@ to the SOURCES registry at the bottom.
 import datetime as dt
 import re
 import time
+from contextlib import contextmanager
 
 import requests
 from bs4 import BeautifulSoup
@@ -49,6 +50,27 @@ def _get(url, params=None):
     r.raise_for_status()
     r.encoding = "utf-8"
     return BeautifulSoup(r.text, "html.parser")
+
+
+@contextmanager
+def browser_page():
+    """A headless Chromium page for JS-rendered sites. Playwright is imported
+    lazily so sources that don't need it (and CI without it) still work; if it
+    is missing, the adapter using this simply fails and the run continues."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox"])
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        try:
+            yield page
+        finally:
+            browser.close()
+
+
+def _rendered_soup(page, url):
+    page.goto(url, wait_until="networkidle", timeout=45000)
+    page.wait_for_timeout(1200)
+    return BeautifulSoup(page.content(), "html.parser")
 
 
 # Dhivehi (Thaana) month names -> month number (several spelling variants).
@@ -321,10 +343,78 @@ def collect_mwsc(target_dates):
 
 
 # ---------------------------------------------------------------------------
+# Source: Ministry of Finance — National Tender (finance.gov.mv/tenders)
+# JS-rendered (Playwright). This is the government-wide list of tenders from
+# every ministry / agency. It is a list of currently-OPEN tenders (not
+# date-sorted), so we page from the top keeping tenders whose submission date is
+# still in the future, and stop once tenders are all closed.
+# ---------------------------------------------------------------------------
+FINANCE_BASE = "https://www.finance.gov.mv/tenders"
+FINANCE_MAX_PAGES = 25
+
+FINANCE_TYPE_EN = {
+    "works": "Works / Project",
+    "goods": "Goods Wanted",
+    "services": "Services",
+    "consultancy": "Consultancy",
+    "consulting": "Consultancy",
+}
+
+
+def collect_finance(target_dates):
+    today = dt.date.today()
+    out = {}
+    with browser_page() as page:
+        empty_streak = 0
+        for n in range(1, FINANCE_MAX_PAGES + 1):
+            soup = _rendered_soup(page, f"{FINANCE_BASE}?page={n}")
+            table = soup.find("table")
+            if not table:
+                break
+            trs = table.find_all("tr")[1:]
+            if not trs:
+                break
+            open_here = 0
+            for tr in trs:
+                tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+                if len(tds) < 10:
+                    continue
+                ptype, ref_no, _, name, _, agency, _, pub_s, sub_s, status = tds[:10]
+                published = parse_english_date(pub_s)
+                deadline = parse_english_date(sub_s.split()[0] if sub_s else "")
+                if not (deadline and deadline >= today):
+                    continue  # keep only still-open tenders
+                open_here += 1
+                ref = extract_ref(ref_no) or extract_ref(name)
+                key = ref_no or name
+                out[key] = {
+                    "source": "Finance",
+                    "id": f"finance:{key}",
+                    "title": _clean(name),
+                    "org": _clean(agency),
+                    "type_slug": "beelan",
+                    "type_en": FINANCE_TYPE_EN.get(ptype.strip().lower(), _clean(ptype) or "Bid / Tender"),
+                    "is_tender": True,
+                    "published": published,
+                    "deadline": deadline,
+                    "url": FINANCE_BASE,
+                    "ref": ref,
+                }
+            if open_here == 0:
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+            else:
+                empty_streak = 0
+    return list(out.values())
+
+
+# ---------------------------------------------------------------------------
 # Registry — add new adapters here as they are built
 # ---------------------------------------------------------------------------
 SOURCES = {
     "Gazette": collect_gazette,
     "STELCO": collect_stelco,
     "MWSC": collect_mwsc,
+    "Finance": collect_finance,
 }

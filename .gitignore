@@ -7,3 +7,10 @@ snippet*.txt
 gz*.html
 
 dbg*.txt
+
+_*.py
+r_*.html
+*_out.txt
+fin_*.txt
+probe.html
+*_test.txt

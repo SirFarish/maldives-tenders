@@ -37,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
       - name: Generate dashboard (rolling 4-day window; covers the Fri/Sat gap)
         run: python tender_collector.py --days 4
 
