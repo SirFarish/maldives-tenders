@@ -1,20 +1,22 @@
 """
-Maldives Daily Tender / Gazette Announcement Collector
-=======================================================
-Scrapes the official Government Gazette (gazette.gov.mv) for every announcement
-published *today*, combines them, and writes a single self-contained HTML
-dashboard you can open in your browser.
+Maldives Daily Tender / Announcement Collector — multi-source
+=============================================================
+Scrapes several Maldives sources (the Government Gazette plus SOE / agency
+sites), combines and de-duplicates them, and writes a single self-contained
+HTML dashboard.
 
-Source: https://www.gazette.gov.mv/iulaan  (server-rendered, no API needed)
+Sources live in sources.py (SOURCES registry). Add adapters there.
 
 Usage:
-    python tender_collector.py                # today's announcements
+    python tender_collector.py                     # today, all sources
+    python tender_collector.py --days 4            # rolling window
     python tender_collector.py --date 2026-09-03
-    python tender_collector.py --days 2       # today + yesterday
+    python tender_collector.py --only Gazette      # a subset of sources
+    python tender_collector.py --list-sources
 
-Output: written to the ./output folder next to this script:
-    tenders_YYYY-MM-DD.html   (dated copy)
-    latest.html               (always the most recent run)
+Output (./output):
+    index.html / latest.html   (served online / most recent run)
+    tenders_YYYY-MM-DD.html     (dated copy)
 """
 
 import argparse
@@ -22,178 +24,98 @@ import datetime as dt
 import html
 import re
 import sys
-import time
+import traceback
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 
-BASE = "https://www.gazette.gov.mv/iulaan"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
-MAX_PAGES = 200         # safety cap; one busy day can span ~20 pages
-REQUEST_PAUSE = 0.5     # be polite to the server
-
-# Dhivehi (Thaana) month names -> month number. Multiple spelling variants.
-DHIVEHI_MONTHS = {
-    1: ["ޖަނަވަރީ", "ޖެނުއަރީ", "ޖެނުއަރ"],
-    2: ["ފެބްރުއަރީ", "ފެބުރުވަރީ", "ފެބުރުއަރީ"],
-    3: ["މާރިޗު", "މާރޗް", "މާރިޗް", "މާޗް"],
-    4: ["އޭޕްރީލް", "އޭޕްރިލް", "އެޕްރީލް"],
-    5: ["މޭ", "މެއި"],
-    6: ["ޖޫން"],
-    7: ["ޖުލައި", "ޖުލާއި"],
-    8: ["އޯގަސްޓު", "އޮގަސްޓު", "އޮގަސްޓް", "އޯގަސްޓް"],
-    9: ["ސެޕްޓެންބަރު", "ސެޕްޓެމްބަރު", "ސެޕްޓެންބަރ"],
-    10: ["އޮކްޓޫބަރު", "އޮކްޓޯބަރު", "އޮކްޓޯބަރ"],
-    11: ["ނޮވެންބަރު", "ނޮވެމްބަރު", "ނޮވެންބަރ"],
-    12: ["ޑިސެންބަރު", "ޑިސެމްބަރު", "ޑިސެންބަރ"],
-}
-_MONTH_LOOKUP = {name: num for num, names in DHIVEHI_MONTHS.items() for name in names}
-
-# Gazette announcement type slug -> readable English label.
-TYPE_EN = {
-    "beelan": "Bid / Tender",
-    "masakkaiy": "Works / Project",
-    "gannan-beynunvaa": "Goods Wanted",
-    "kuyyah-dhinun": "For Lease",
-    "kuyyah-hifun": "Wanted to Rent",
-    "neelan": "Auction",
-    "vazeefaa": "Job Vacancy",
-    "thamreenu": "Training",
-    "mubaaraaiy": "Competition",
-    "aanmu-mauloomaathu": "General Info",
-    "dhennevun": "Notice",
-}
-# Types that represent an actual tender / procurement opportunity.
-TENDER_TYPES = {"beelan", "masakkaiy", "gannan-beynunvaa",
-                "kuyyah-dhinun", "kuyyah-hifun", "neelan"}
+import sources as src
 
 
-def parse_dhivehi_date(text):
-    """'03 ސެޕްޓެންބަރު 2026 00:00' -> datetime.date(2026, 9, 3) (or None)."""
-    if not text:
-        return None
-    text = text.strip()
-    m = re.search(r"(\d{1,2})\s+(\S+)\s+(\d{4})", text)
-    if not m:
-        return None
-    day, month_word, year = int(m.group(1)), m.group(2), int(m.group(3))
-    month = _MONTH_LOOKUP.get(month_word)
-    if month is None:
-        # tolerate a trailing/leading character difference
-        for name, num in _MONTH_LOOKUP.items():
-            if name in month_word or month_word in name:
-                month = num
-                break
-    if month is None:
-        return None
-    try:
-        return dt.date(year, month, day)
-    except ValueError:
-        return None
+# ---------------------------------------------------------------------------
+# Collect + merge + de-duplicate
+# ---------------------------------------------------------------------------
+def _norm_words(title):
+    return set(re.sub(r"[^a-z0-9 ]", " ", (title or "").lower()).split())
 
 
-def _clean(s):
-    return re.sub(r"\s+", " ", (s or "")).strip()
+def _similar(a, b):
+    wa, wb = _norm_words(a), _norm_words(b)
+    if not wa or not wb:
+        return False
+    return len(wa & wb) / len(wa | wb) >= 0.45
 
 
-def parse_row(item):
-    """Parse one .bordered.items block into a dict, or None."""
-    title_a = item.select_one("a.iulaan-title")
-    if not title_a:
-        return None
+def dedupe(records):
+    """Merge the same tender advertised on more than one source. Two records are
+    merged only when they share a reference key AND have similar titles, so a
+    coincidental ref collision between unrelated offices is left alone."""
+    by_ref = {}
+    singles = []
+    for r in records:
+        (by_ref.setdefault(r["ref"], []) if r["ref"] else singles).append(r)
 
-    type_a = item.select_one("a.iulaan-type")
-    office_a = item.select_one("a.iulaan-office")
-
-    type_slug = ""
-    if type_a and type_a.get("href"):
-        m = re.search(r"type=([^&]+)", type_a["href"])
-        type_slug = m.group(1) if m else ""
-
-    # Published date and deadline live in the info line as
-    # "ތާރީޚު: <date>" and "ސުންގަޑި: <deadline>".
-    block_text = item.get_text("\n", strip=True)
-    published = deadline = None
-    pub_raw = dl_raw = ""
-    for line in block_text.split("\n"):
-        d = parse_dhivehi_date(line)
-        if d is None:
-            continue
-        # First dated line = published, second = deadline (site order).
-        if published is None:
-            published, pub_raw = d, line
-        elif deadline is None:
-            deadline, dl_raw = d, line
-
-    return {
-        "id": _clean(title_a.get("href", "")).rsplit("/", 1)[-1],
-        "title": _clean(title_a.get_text()),
-        "type_slug": type_slug,
-        "type_label": _clean(type_a.get_text()) if type_a else "",
-        "type_en": TYPE_EN.get(type_slug, _clean(type_a.get_text()) if type_a else type_slug),
-        "is_tender": type_slug in TENDER_TYPES,
-        "office": _clean(office_a.get_text()) if office_a else "",
-        "url": title_a.get("href", ""),
-        "published": published,
-        "deadline": deadline,
-    }
-
-
-def fetch_page(page):
-    r = requests.get(BASE, params={"page": page}, headers=HEADERS, timeout=25)
-    r.raise_for_status()
-    r.encoding = "utf-8"
-    return BeautifulSoup(r.text, "html.parser")
-
-
-def collect(target_dates):
-    """Walk pages (roughly newest-first) collecting rows whose published date is
-    in target_dates.
-
-    The gazette listing is mostly published-date descending but sprinkles a few
-    out-of-order ("bumped"/edited) older entries into otherwise-current pages, so
-    we must NOT stop on a single stray. We stop only once the *newest* item on a
-    page is older than the oldest date we want, confirmed over 2 pages in a row.
-    """
-    oldest_wanted = min(target_dates)
-    results = {}
-    stale_pages = 0
-    for page in range(1, MAX_PAGES + 1):
-        soup = fetch_page(page)
-        rows = soup.select("div.bordered.items")
-        if not rows:
-            break
-        page_max = None
-        for item in rows:
-            row = parse_row(item)
-            if not row or not row["published"]:
+    merged = list(singles)
+    for ref, group in by_ref.items():
+        used = [False] * len(group)
+        for i, r in enumerate(group):
+            if used[i]:
                 continue
-            p = row["published"]
-            page_max = p if page_max is None else max(page_max, p)
-            if p in target_dates:
-                results[row["id"]] = row  # dedupe by id
-        if page_max is not None and page_max < oldest_wanted:
-            stale_pages += 1
-            if stale_pages >= 2:  # confidently past the window
-                break
-        else:
-            stale_pages = 0
-        time.sleep(REQUEST_PAUSE)
-    return sorted(results.values(), key=lambda r: (r["published"], r["type_label"]), reverse=True)
+            cluster = [r]
+            used[i] = True
+            for j in range(i + 1, len(group)):
+                if not used[j] and _similar(r["title"], group[j]["title"]):
+                    cluster.append(group[j])
+                    used[j] = True
+            merged.append(_merge_cluster(cluster))
+    return merged
+
+
+def _merge_cluster(cluster):
+    """Combine records for the same tender into one, preferring the richest."""
+    if len(cluster) == 1:
+        cluster[0]["also_on"] = []
+        return cluster[0]
+    # Primary = the one with a deadline, else the first.
+    primary = next((c for c in cluster if c["deadline"]), cluster[0])
+    others = [c for c in cluster if c is not primary]
+    primary["deadline"] = primary["deadline"] or next(
+        (c["deadline"] for c in others if c["deadline"]), None)
+    primary["is_tender"] = any(c["is_tender"] for c in cluster)
+    primary["also_on"] = [{"source": c["source"], "url": c["url"]} for c in others]
+    return primary
+
+
+def collect(target_dates, only=None):
+    """Run every (or the chosen) source adapter, isolating failures."""
+    records, errors = [], []
+    for name, fn in src.SOURCES.items():
+        if only and name not in only:
+            continue
+        try:
+            got = fn(target_dates)
+            records.extend(got)
+            print(f"  {name}: {len(got)}")
+        except Exception as e:  # one bad source must not sink the whole run
+            errors.append(f"{name}: {e}")
+            print(f"  {name}: FAILED — {e}", file=sys.stderr)
+            traceback.print_exc()
+    merged = dedupe(records)
+    merged.sort(key=lambda r: (not r["is_tender"], r["published"] or dt.date.min,
+                               r["source"]), reverse=False)
+    # tenders first; within that, newest published first
+    merged.sort(key=lambda r: (not r["is_tender"],
+                               -(r["published"] or dt.date.min).toordinal()))
+    return merged, errors
 
 
 # ---------------------------------------------------------------------------
 # HTML dashboard
 # ---------------------------------------------------------------------------
-def build_html(rows, target_dates, generated_at):
+def build_html(rows, target_dates, generated_at, errors):
     today = dt.date.today()
-    # Tenders first, then by published date (newest), then type.
-    rows = sorted(rows, key=lambda r: (not r["is_tender"], r["type_en"]))
     types = sorted({r["type_en"] for r in rows if r["type_en"]})
+    src_names = sorted({r["source"] for r in rows})
 
     def esc(s):
         return html.escape(str(s or ""))
@@ -204,9 +126,9 @@ def build_html(rows, target_dates, generated_at):
         if dl:
             days_left = (dl - today).days
             if days_left < 0:
-                badge = f'<span class="badge over">closed</span>'
+                badge = '<span class="badge over">closed</span>'
             elif days_left == 0:
-                badge = f'<span class="badge soon">closes today</span>'
+                badge = '<span class="badge soon">closes today</span>'
             elif days_left <= 3:
                 badge = f'<span class="badge soon">{days_left}d left</span>'
             else:
@@ -215,26 +137,40 @@ def build_html(rows, target_dates, generated_at):
         else:
             badge, dl_str = "", "—"
 
+        also = "".join(
+            f'<a class="src-extra" href="{esc(a["url"])}" target="_blank" rel="noopener" title="also on {esc(a["source"])}">+{esc(a["source"])}</a>'
+            for a in r.get("also_on", []))
+
         cards.append(f"""
-    <tr data-type="{esc(r['type_en'])}" data-tender="{'1' if r['is_tender'] else '0'}" data-search="{esc((r['title']+' '+r['office']).lower())}">
+    <tr data-type="{esc(r['type_en'])}" data-source="{esc(r['source'])}" data-tender="{'1' if r['is_tender'] else '0'}" data-search="{esc((r['title']+' '+r['org']+' '+r['source']).lower())}">
+      <td class="src"><span class="srcpill s-{esc(r['source'].lower())}">{esc(r['source'])}</span>{also}</td>
       <td class="type"><span class="pill{' t' if r['is_tender'] else ''}">{esc(r['type_en'])}</span></td>
       <td class="title"><a href="{esc(r['url'])}" target="_blank" rel="noopener">{esc(r['title'])}</a></td>
-      <td class="office">{esc(r['office'])}</td>
+      <td class="office">{esc(r['org'])}</td>
       <td class="date">{esc(r['published'].strftime('%d %b %Y') if r['published'] else '')}</td>
       <td class="date">{esc(dl_str)} {badge}</td>
     </tr>""")
 
     sd = sorted(target_dates)
-    if len(sd) == 1:
-        date_label = sd[0].strftime("%d %b %Y")
-    else:
-        date_label = f"{sd[0].strftime('%d %b')} – {sd[-1].strftime('%d %b %Y')}"
+    date_label = sd[0].strftime("%d %b %Y") if len(sd) == 1 \
+        else f"{sd[0].strftime('%d %b')} – {sd[-1].strftime('%d %b %Y')}"
+
     n_tender = sum(1 for r in rows if r["is_tender"])
-    filter_btns = '<button class="flt active" data-flt="">All ({})</button>'.format(len(rows))
-    filter_btns += f'<button class="flt tender" data-flt="__tender__">Tenders only ({n_tender})</button>'
+    type_btns = '<button class="flt active" data-dim="type" data-flt="">All types ({})</button>'.format(len(rows))
+    type_btns += f'<button class="flt tender" data-dim="type" data-flt="__tender__">Tenders only ({n_tender})</button>'
     for t in types:
         n = sum(1 for r in rows if r["type_en"] == t)
-        filter_btns += f'<button class="flt" data-flt="{esc(t)}">{esc(t)} ({n})</button>'
+        type_btns += f'<button class="flt" data-dim="type" data-flt="{esc(t)}">{esc(t)} ({n})</button>'
+
+    src_btns = '<button class="flt active" data-dim="source" data-flt="">All sources ({})</button>'.format(len(rows))
+    for s in src_names:
+        n = sum(1 for r in rows if r["source"] == s)
+        src_btns += f'<button class="flt" data-dim="source" data-flt="{esc(s)}">{esc(s)} ({n})</button>'
+
+    err_note = ""
+    if errors:
+        err_note = ('<div class="errs">⚠ Some sources could not be reached this run: '
+                    + esc("; ".join(errors)) + "</div>")
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -247,19 +183,22 @@ def build_html(rows, target_dates, generated_at):
     background:#f5f6f8; color:#1a1c20; }}
   header {{ background:#0b3d2e; color:#fff; padding:20px 24px; }}
   header h1 {{ margin:0 0 4px; font-size:20px; }}
-  header .sub {{ opacity:.8; font-size:13px; }}
-  .wrap {{ max-width:1200px; margin:0 auto; padding:20px 24px 60px; }}
-  .toolbar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:16px 0; }}
+  header .sub {{ opacity:.85; font-size:13px; }}
+  .wrap {{ max-width:1240px; margin:0 auto; padding:16px 24px 60px; }}
+  .toolbar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:14px 0 4px; }}
+  .toolbar.src {{ margin-top:4px; }}
+  .lbl {{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8a9098; margin-right:2px; }}
   .flt {{ border:1px solid #cdd2d8; background:#fff; color:#333; border-radius:20px;
-    padding:6px 14px; font-size:13px; cursor:pointer; }}
+    padding:5px 13px; font-size:13px; cursor:pointer; }}
   .flt.active {{ background:#0b3d2e; color:#fff; border-color:#0b3d2e; }}
-  #q {{ flex:1; min-width:200px; padding:9px 14px; border:1px solid #cdd2d8;
-    border-radius:8px; font-size:14px; }}
+  .flt.tender {{ border-color:#0b3d2e; color:#0b3d2e; font-weight:600; }}
+  .flt.tender.active {{ background:#0b3d2e; color:#fff; }}
+  #q {{ flex:1; min-width:200px; padding:9px 14px; border:1px solid #cdd2d8; border-radius:8px; font-size:14px; }}
   table {{ width:100%; border-collapse:collapse; background:#fff; border-radius:10px;
-    overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.08); }}
+    overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-top:12px; }}
   th {{ text-align:left; font-size:12px; text-transform:uppercase; letter-spacing:.04em;
-    color:#6b7280; padding:12px 14px; border-bottom:2px solid #eef0f2; }}
-  td {{ padding:12px 14px; border-bottom:1px solid #f0f2f4; vertical-align:top; }}
+    color:#6b7280; padding:11px 14px; border-bottom:2px solid #eef0f2; }}
+  td {{ padding:11px 14px; border-bottom:1px solid #f0f2f4; vertical-align:top; }}
   tr:last-child td {{ border-bottom:none; }}
   .title a {{ color:#0b5cad; text-decoration:none; font-weight:500; }}
   .title a:hover {{ text-decoration:underline; }}
@@ -267,12 +206,15 @@ def build_html(rows, target_dates, generated_at):
   .date {{ white-space:nowrap; color:#444; }}
   .pill {{ background:#eceff1; color:#455a64; border-radius:6px; padding:2px 8px; font-size:12px; white-space:nowrap; }}
   .pill.t {{ background:#eaf3ee; color:#0b3d2e; font-weight:600; }}
-  .flt.tender {{ border-color:#0b3d2e; color:#0b3d2e; font-weight:600; }}
-  .flt.tender.active {{ background:#0b3d2e; color:#fff; }}
+  .srcpill {{ border-radius:6px; padding:2px 8px; font-size:12px; font-weight:600; background:#e7edf5; color:#274b74; white-space:nowrap; }}
+  .srcpill.s-stelco {{ background:#fdf0e4; color:#a05a1a; }}
+  .src-extra {{ display:inline-block; margin-left:4px; font-size:11px; color:#8a5a1a; text-decoration:none; }}
   .badge {{ font-size:11px; padding:1px 7px; border-radius:10px; margin-left:4px; }}
   .badge.ok {{ background:#e8f0fe; color:#1a56b0; }}
   .badge.soon {{ background:#fdecec; color:#c0392b; }}
   .badge.over {{ background:#eceff1; color:#78909c; }}
+  .errs {{ background:#fff6e5; color:#8a5a00; border:1px solid #ffe0a3; border-radius:8px;
+    padding:8px 12px; font-size:12px; margin-top:12px; }}
   .empty {{ padding:40px; text-align:center; color:#888; }}
   footer {{ text-align:center; color:#9aa0a6; font-size:12px; margin-top:24px; }}
   @media (prefers-color-scheme: dark) {{
@@ -283,37 +225,48 @@ def build_html(rows, target_dates, generated_at):
     .flt {{ background:#1e2127; color:#cfd3d8; border-color:#333; }}
     #q {{ background:#1e2127; color:#e6e8eb; border-color:#333; }}
     .office {{ color:#aab; }} .date {{ color:#bcc; }}
-    .pill {{ background:#173a2c; color:#8fe3bd; }}
+    .pill {{ background:#2a2f36; color:#c2cad3; }}
+    .pill.t {{ background:#173a2c; color:#8fe3bd; }}
+    .srcpill {{ background:#1c2c40; color:#9dc0ee; }}
+    .srcpill.s-stelco {{ background:#3a2a17; color:#e3b98f; }}
+    .errs {{ background:#2c2410; color:#e3c583; border-color:#5a4a1a; }}
   }}
 </style></head><body>
 <header>
   <h1>Maldives Public Tenders &amp; Gazette Announcements</h1>
-  <div class="sub">Published: {esc(date_label)} &nbsp;•&nbsp; {len(rows)} announcements &nbsp;•&nbsp; source: gazette.gov.mv</div>
+  <div class="sub">Published: {esc(date_label)} &nbsp;•&nbsp; {len(rows)} announcements &nbsp;•&nbsp; sources: {esc(', '.join(src_names))}</div>
 </header>
 <div class="wrap">
-  <div class="toolbar">{filter_btns}<input id="q" placeholder="Search title or organisation…"></div>
+  {err_note}
+  <div class="toolbar"><span class="lbl">Type</span>{type_btns}</div>
+  <div class="toolbar src"><span class="lbl">Source</span>{src_btns}
+    <input id="q" placeholder="Search title, organisation or source…"></div>
   <table>
-    <thead><tr><th>Type</th><th>Title</th><th>Organisation</th><th>Published</th><th>Deadline</th></tr></thead>
-    <tbody id="rows">{''.join(cards) if cards else ''}</tbody>
+    <thead><tr><th>Source</th><th>Type</th><th>Title</th><th>Organisation</th><th>Published</th><th>Deadline</th></tr></thead>
+    <tbody id="rows">{''.join(cards)}</tbody>
   </table>
   <div class="empty" id="empty" style="display:none">No announcements match your filter.</div>
-  <footer>Generated {esc(generated_at)} • Data from the official Maldives Government Gazette</footer>
+  <footer>Generated {esc(generated_at)} • Government Gazette + SOE / agency sites</footer>
 </div>
 <script>
   const q=document.getElementById('q'), rows=[...document.querySelectorAll('#rows tr')];
-  let curFilter='';
+  let curType='', curSource='';
   function apply(){{
     const term=q.value.trim().toLowerCase(); let shown=0;
     rows.forEach(tr=>{{
-      const okT=!curFilter||(curFilter==='__tender__'?tr.dataset.tender==='1':tr.dataset.type===curFilter);
+      const okT=!curType||(curType==='__tender__'?tr.dataset.tender==='1':tr.dataset.type===curType);
+      const okSrc=!curSource||tr.dataset.source===curSource;
       const okS=!term||tr.dataset.search.includes(term);
-      const vis=okT&&okS; tr.style.display=vis?'':'none'; if(vis)shown++;
+      const vis=okT&&okSrc&&okS; tr.style.display=vis?'':'none'; if(vis)shown++;
     }});
     document.getElementById('empty').style.display=shown?'none':'';
   }}
   document.querySelectorAll('.flt').forEach(b=>b.onclick=()=>{{
-    document.querySelectorAll('.flt').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active'); curFilter=b.dataset.flt; apply();
+    const dim=b.dataset.dim;
+    document.querySelectorAll('.flt[data-dim="'+dim+'"]').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    if(dim==='type') curType=b.dataset.flt; else curSource=b.dataset.flt;
+    apply();
   }});
   q.oninput=apply;
 </script>
@@ -324,18 +277,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="YYYY-MM-DD (default: today)")
     ap.add_argument("--days", type=int, default=1, help="how many days back to include")
+    ap.add_argument("--only", help="comma-separated source names to run (default: all)")
+    ap.add_argument("--list-sources", action="store_true")
     args = ap.parse_args()
 
+    if args.list_sources:
+        print("Available sources:", ", ".join(src.SOURCES))
+        return
+
+    only = {s.strip() for s in args.only.split(",")} if args.only else None
     end = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
     target_dates = {end - dt.timedelta(days=i) for i in range(args.days)}
 
-    print(f"Collecting gazette announcements for: "
-          f"{', '.join(d.isoformat() for d in sorted(target_dates))}")
-    rows = collect(target_dates)
-    print(f"Found {len(rows)} announcements.")
+    print(f"Collecting for {', '.join(d.isoformat() for d in sorted(target_dates))}"
+          f" from {', '.join(only) if only else 'all sources'}:")
+    rows, errors = collect(target_dates, only)
+    print(f"Total after de-duplication: {len(rows)}")
 
     generated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    page = build_html(rows, target_dates, generated_at)
+    page = build_html(rows, target_dates, generated_at, errors)
 
     out_dir = Path(__file__).resolve().parent / "output"
     out_dir.mkdir(exist_ok=True)
