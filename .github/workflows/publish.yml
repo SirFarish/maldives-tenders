@@ -1,0 +1,53 @@
+name: Publish Maldives Tenders
+
+on:
+  schedule:
+    # 11:00 UTC = 4:00 PM Maldives time (captures the full working day's postings)
+    - cron: "0 11 * * *"
+  workflow_dispatch:       # allow manual "Run workflow" from the Actions tab
+  push:
+    branches: [main]       # deploy immediately on the first push / any code change
+
+# Let the workflow publish to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; newer run wins
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate dashboard (rolling 4-day window; covers the Fri/Sat gap)
+        run: python tender_collector.py --days 4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

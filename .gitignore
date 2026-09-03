@@ -1,0 +1,9 @@
+output/
+__pycache__/
+*.pyc
+check.txt
+slugs.txt
+snippet*.txt
+gz*.html
+
+dbg*.txt
