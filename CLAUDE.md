@@ -35,9 +35,16 @@ in the Maldives and combines them into one shareable, auto-updating dashboard.
 | STELCO (stelco.com.mv/tenders) | ✅ live | static table; English dates; `?cp_1=N` pages |
 | MWSC (mwsc.com.mv/tenders) | ✅ live | open-tenders table |
 | Finance national tender (finance.gov.mv/tenders) | ✅ live | **Playwright** (JS); govt-wide agencies; open tenders |
-| STO, MTCC, MACL, HDC | ⏳ TODO | JS-rendered → use the `browser_page()` Playwright helper |
+| STO (sto.mv/newsroom/tenders) | ✅ live | **Playwright**; current tenders; REF NO + publish date |
+| MACL (macl.aero/tenders) | ⚠️ empty | renders with no tender rows — no current tenders or a deferred loader; revisit |
+| MTCC (mtcc.mv/downloads) | ⏳ TODO | 640 undated PDFs; hard to date-filter |
+| HDC | ⏳ TODO | JS-rendered; needs inspection |
 | Fenaka (fenaka.mv/tenders) | ⏳ TODO | rendered blank; needs a different wait/approach |
-| Maldives Ports (cnm.mv/notice) | ⏳ TODO | static Dhivehi card board; no Playwright needed |
+| Maldives Ports (cnm.mv/notice) | ⏳ TODO | static Dhivehi card board (864 cards); no Playwright needed |
+
+Note: Finance national tender already aggregates government-wide (agency) tenders, and
+SOEs are legally required to also post in the Gazette — so Gazette + Finance already
+capture the large majority. Remaining SOE adapters add mostly site-only posts + documents.
 
 ## Run locally
 ```
