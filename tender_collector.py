@@ -210,6 +210,7 @@ def build_html(rows, target_dates, generated_at, errors):
   .srcpill.s-stelco {{ background:#fdf0e4; color:#a05a1a; }}
   .srcpill.s-mwsc {{ background:#e4f3f6; color:#12707f; }}
   .srcpill.s-finance {{ background:#ece4f6; color:#5a3a9a; }}
+  .srcpill.s-sto {{ background:#e6f0e6; color:#2f6b3a; }}
   .src-extra {{ display:inline-block; margin-left:4px; font-size:11px; color:#8a5a1a; text-decoration:none; }}
   .badge {{ font-size:11px; padding:1px 7px; border-radius:10px; margin-left:4px; }}
   .badge.ok {{ background:#e8f0fe; color:#1a56b0; }}
@@ -233,12 +234,14 @@ def build_html(rows, target_dates, generated_at, errors):
     .srcpill.s-stelco {{ background:#3a2a17; color:#e3b98f; }}
     .srcpill.s-mwsc {{ background:#153338; color:#8fd6e0; }}
     .srcpill.s-finance {{ background:#251a3a; color:#c3a8ef; }}
+    .srcpill.s-sto {{ background:#17301b; color:#9bd6a5; }}
     .errs {{ background:#2c2410; color:#e3c583; border-color:#5a4a1a; }}
   }}
 </style></head><body>
 <header>
   <h1>Maldives Public Tenders &amp; Gazette Announcements</h1>
   <div class="sub">Published: {esc(date_label)} &nbsp;•&nbsp; {len(rows)} announcements &nbsp;•&nbsp; sources: {esc(', '.join(src_names))}</div>
+  <div class="sub">🔄 Refreshes automatically every day at <b>4:00 PM Maldives time</b> &nbsp;•&nbsp; last updated {esc(generated_at)}</div>
 </header>
 <div class="wrap">
   {err_note}
@@ -250,7 +253,7 @@ def build_html(rows, target_dates, generated_at, errors):
     <tbody id="rows">{''.join(cards)}</tbody>
   </table>
   <div class="empty" id="empty" style="display:none">No announcements match your filter.</div>
-  <footer>Generated {esc(generated_at)} • Government Gazette + SOE / agency sites</footer>
+  <footer>Auto-updates daily at 4:00 PM Maldives time (11:00 UTC) • Last generated {esc(generated_at)} • Government Gazette + SOE / agency sites</footer>
 </div>
 <script>
   const q=document.getElementById('q'), rows=[...document.querySelectorAll('#rows tr')];
@@ -298,7 +301,10 @@ def main():
     rows, errors = collect(target_dates, only)
     print(f"Total after de-duplication: {len(rows)}")
 
-    generated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Always report the update time in Maldives time (UTC+5), since the daily
+    # job runs on GitHub's UTC servers.
+    mvt = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=5)
+    generated_at = mvt.strftime("%d %b %Y, %H:%M") + " MVT"
     page = build_html(rows, target_dates, generated_at, errors)
 
     out_dir = Path(__file__).resolve().parent / "output"

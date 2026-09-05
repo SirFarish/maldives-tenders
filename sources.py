@@ -410,6 +410,49 @@ def collect_finance(target_dates):
 
 
 # ---------------------------------------------------------------------------
+# Source: STO (sto.mv/newsroom/tenders) — JS-rendered list of current tenders.
+# Small "active tenders" page: include everything listed (open-tender model).
+# ---------------------------------------------------------------------------
+STO_BASE = "https://sto.mv"
+STO_TENDERS = "https://sto.mv/newsroom/tenders"
+_DATE_RX = re.compile(r"[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}")
+
+
+def collect_sto(target_dates):
+    with browser_page() as page:
+        soup = _rendered_soup(page, STO_TENDERS)
+    out = {}
+    for a in soup.find_all("a", href=re.compile(r"^/newsroom/tenders/\d+/")):
+        href = a["href"]
+        if href in out:
+            continue
+        node = a
+        for _ in range(4):
+            if node.parent:
+                node = node.parent
+        text = node.get_text(" ", strip=True)
+        title = _clean(re.sub(r"^\s*tender\b", "", a.get_text(" ", strip=True), flags=re.I))
+        if not title:
+            continue
+        m = _DATE_RX.search(text)
+        published = parse_english_date(m.group(0)) if m else None
+        out[href] = {
+            "source": "STO",
+            "id": f"sto:{href}",
+            "title": title,
+            "org": "STO",
+            "type_slug": "beelan",
+            "type_en": "Bid / Tender",
+            "is_tender": True,
+            "published": published,
+            "deadline": None,
+            "url": STO_BASE + href,
+            "ref": extract_ref(title),
+        }
+    return list(out.values())
+
+
+# ---------------------------------------------------------------------------
 # Registry — add new adapters here as they are built
 # ---------------------------------------------------------------------------
 SOURCES = {
@@ -417,4 +460,5 @@ SOURCES = {
     "STELCO": collect_stelco,
     "MWSC": collect_mwsc,
     "Finance": collect_finance,
+    "STO": collect_sto,
 }
